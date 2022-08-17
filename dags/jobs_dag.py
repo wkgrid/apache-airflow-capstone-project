@@ -19,7 +19,7 @@ print('start')
 ############################################
 
 with DAG(
-        "lab1_basic",
+        "lab1.1_basic",
         start_date=datetime(2021, 1, 1),    # start date, the 1st of January 2021
         schedule_interval='*/1 * * * *',    # Cron expression, runs every minute, if changed the value is not refreshed on the UI
         catchup=False                       # Catchup
@@ -34,7 +34,7 @@ with DAG(
 #############################################
 
 with DAG(
-        "lab2_fake_db_actions",      # Dag id
+        "lab1.2_fake_db_actions",      # Dag id
         start_date=datetime(2021, 1, 1),    # start date, the 1st of January 2021
         schedule_interval='*/2 * * * *',         # Cron expression, here it is a preset of Airflow, @daily means once every day.
         catchup=False                       # Catchup
@@ -49,6 +49,7 @@ with DAG(
 
     insert_row_task = PythonOperator(task_id='insert_row', python_callable=insert_row)    # NOTE: No spaces and hyphens in the name
     table_query_task = PythonOperator(task_id="query_table", python_callable=query_table)
+
     insert_row_task >> table_query_task
 
 
@@ -72,14 +73,17 @@ with DAG(
     insert_row_task = EmptyOperator(task_id="insert_row", trigger_rule='none_failed')
     create_table_task = EmptyOperator(task_id="create_table")
     table_query_task = EmptyOperator(task_id="query_table")
+    table_query_task.xcom_push(key='result', value='true')
+
     check_table_exists_task >> [create_table_task, insert_row_task]
     create_table_task >> insert_row_task
     insert_row_task >> table_query_task
 
 
 #############################################
-
+import time
 from airflow.sensors.filesystem import FileSensor
+from airflow.sensors.external_task_sensor import ExternalTaskSensor
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 with DAG(
@@ -92,8 +96,8 @@ with DAG(
     file_path = "/home/wojtek/Workspace/max-ml/big-data/airflow/tests/file.txt"
 
     file_sensor_task = FileSensor(task_id="file_sensor", filepath=file_path)
-    trigger_dag_task = TriggerDagRunOperator(task_id="trigger_dag", trigger_dag_id="lab3_branch")
-    remove_file_task = BashOperator(task_id="remove_file", bash_command=f'rm {file_path}; echo REMOVED')
+    trigger_dag_task = TriggerDagRunOperator(task_id="trigger_dag", trigger_dag_id="lab3_branching")
+    remove_file_task = BashOperator(task_id="remove_file", bash_command=f'rm {file_path}; touch execution_{time.time()}')
     file_sensor_task >> trigger_dag_task >> remove_file_task
 
 
@@ -102,10 +106,15 @@ with DAG(
 from airflow.models import Variable
 from airflow.operators.subdag_operator import SubDagOperator
 
+
+import logging
+
+LOGGER = logging.getLogger("airflow")
+
 with DAG(
         "lab5_subdag",
         start_date=datetime(2021, 1, 1),
-        schedule_interval='*/5 * * * *',
+        # schedule_interval='*/5 * * * *',
         catchup=False                       #
 ) as dag5:
 
@@ -114,15 +123,20 @@ with DAG(
 
     print(f"FILE_NAME_VAR={file_path}")
 
+    def log_result():
+        LOGGER.info(">>> PRINT RESULT")
 
     # [WK] the constraint for the format of sub_dag id is really strange!
     sub_dag = DAG("lab5_subdag.sub_dag", start_date=datetime(2021, 1, 1), schedule_interval='@daily', catchup=False)
 
-    sub_task1 = EmptyOperator(task_id="t1", dag=sub_dag)    # [WK] why tasks have a reference to dag???
-    sub_task2 = EmptyOperator(task_id="t2", dag=sub_dag)
-    sub_task1 >> sub_task2
+    sub_task1_sensor = ExternalTaskSensor(task_id="sensor", external_dag_id="result", external_task_id=None, dag=sub_dag)
+    sub_task2_print_result = PythonOperator(task_id="print_result", python_callable=log_result, dag=sub_dag)
+    sub_task2_print_result.xcom_pull(key='result', task_ids=['lab3_branching.query_table'])
+    sub_task3_rem_run_file = BashOperator(task_id="remove_run_file", bash_command=f'rm {file_path}', dag=sub_dag)
+    sub_task4_create_timestamp = BashOperator(task_id="create_timestamp", bash_command=f'touch execution_{time.time()}', dag=sub_dag)
+    sub_task1_sensor >> sub_task2_print_result >> sub_task3_rem_run_file >> sub_task4_create_timestamp
 
-    file_sensor_task = FileSensor(task_id="file_sensor", filepath=file_path)
+    start_task = EmptyOperator(task_id="start")
     sub_dag_task = SubDagOperator(task_id='sub_dag', subdag=sub_dag)
-    remove_file_task = BashOperator(task_id="remove_file", bash_command=f'rm {file_path}; echo REMOVED')
-    file_sensor_task >> sub_dag_task >> remove_file_task
+    finish_task = EmptyOperator(task_id="finish")
+    start_task >> sub_dag_task >> finish_task
